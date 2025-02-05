@@ -9,6 +9,9 @@ conda activate dnaseq
 #trimmomatic
 #bwa
 #samtools
+#picard
+#gatk4
+#entrez-direct
 
 #Spostare i file da linux a windows
 for file in './4fastqc_output/*.html'; do
@@ -146,8 +149,9 @@ for sequence in 5bwa/*.sam; do
 	basename=$(basename $sequence .sam)
 	#samtools view -bT hg19.fa sequence1.sam > sequence1.bam # when no header
 	samtools view -bS $sequence > 6samtools/$basename.bam # when SAM header present
-	samtools sort -O bam -o 6samtools/$basename.sorted.bam -T temp 6samtools/$basename.bam # sort by coordinate to streamline data processing
-	samtools index 6samtools/$basename.sorted.bam # a position-sorted BAM file can also beindexed
+	#Could also sort and index alignment here but in this particular pipeline would be performed in STEP 4 
+	#samtools sort -O bam -o 6samtools/$basename.sorted.bam -T temp 6samtools/$basename.bam # sort by coordinate to streamline data processing
+	#samtools index 6samtools/$basename.sorted.bam # a position-sorted BAM file can also beindexed
 done
 
 #check alignment quality 
@@ -155,7 +159,70 @@ samtools stats file.bam
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
 
-# STEP 4 Copy number calling pipeline
+# STEP 4 Processing of alignment
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
+
+mkdir 7picard/
+
+#To identify and remove PCR duplicates Read groups (RG) are necessary in the BAM files
+
+#Here we use entrez-direct to retrieve and add RG info to alignments 
+for alignment in 6samtools/*.bam; do
+    run_basename=$(basename "$alignment" _12_pe.bam)  # Extract run name from BAM filename
+
+    echo "Processing: $alignment (Run: $run_basename)"
+
+    # Retrieve metadata for the current run numbers correspond to column name of data of interest e.g. $1 -> Run 
+    metadata=$(esearch -db sra -query "$run_basename" | efetch -format runinfo | awk -F ',' 'NR>1 {print $1","$12","$19","$20","$26}')
+    
+    if [[ -z "$metadata" ]]; then
+        echo "WARNING: No metadata found for $run_basename, skipping..."
+        continue
+    fi
+
+    # Parse metadata into separate variables
+    IFS=',' read -r Run LibraryName Platform Model Sample <<< "$metadata"
+
+    # Check if the BAM file exists
+    if [[ -f "$alignment" ]]; then
+        echo "Adding read group to $alignment"
+        picard AddOrReplaceReadGroups \
+            -I "$alignment" \
+            -O "7picard/${run_basename}_RG.bam" \
+            -RGID "$Run" \
+            -RGLB "$LibraryName" \
+            -RGPL "$Platform" \
+            -RGPU "$Model" \
+            -RGSM "$Sample" \
+			-VALIDATION_STRINGENCY LENIENT #This parameter is necessary to skip unmapped reads that are not crucial for the subsequent analysis
+    else
+        echo "ERROR: BAM file $alignment not found!"
+    fi
+done
+
+for alignment in 6samtools/*.bam; do
+	echo $alignment
+	# picard MarkDuplicates \
+	# 	-I $alignment \
+	# 	-O 7picard/$(basename $alignment .bam)_marked_duplicates.bam \
+	# 	-M 7picard/$(basename $alignment .bam)_marked_dup_metrics.txt
+	# 	REMOVE_DUPLICATES=true
+done
+
+for case in 6samtools/*7*.bam; do 
+	normal=${case/7/6}
+	echo $case
+	echo $normal 
+	# picard MarkDuplicates \
+	# 	-I sorted.bam \
+	# 	-O marked_duplicates.bam \
+	# 	-M marked_dup_metrics.txt
+done
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
+
+# STEP 5 Copy number calling pipeline
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
 
@@ -203,3 +270,5 @@ do
 		cnvkit.py batch $case -n $normal --targets 7cnvkitin/S03723314_Covered.bed --fasta 5bwa/hg19/hg19.fa --access 7cnvkitin/access-hg19.bed --output-dir "8cnvkitout/$sample_name" --scatter -p $num_cores --drop-low-coverage 
 	fi 
 done
+
+
