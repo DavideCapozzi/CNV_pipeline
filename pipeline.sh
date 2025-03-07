@@ -373,8 +373,7 @@ conda activate dnaseq
 
 #Index all files 
 for file in refdb/*.vcf.gz; do 
-	echo $file 
-	#tabix -p vcf $file 
+	tabix -p vcf $file 
 done 
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
