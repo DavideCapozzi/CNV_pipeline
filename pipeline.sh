@@ -1,16 +1,19 @@
 #!/bin/bash
 
 conda activate dnaseq
-#List of compatible packages in dnaseq channel: 
+#List of compatible packages in dnaseq channel: (TS2 are on server) 
 #sratoolkit
 #fastqc
 #fastp
 #cutadapt
 #trimmomatic
 #bwa
-#samtools
-#picard
-#gatk4
+#samtools (TS2)
+#picard (TS2)
+#gatk4 (TS2)
+#bcftools (TS2)
+#htslib (TS2 only)
+#vcftools (TS2 only)
 #entrez-direct
 
 #Spostare i file da linux a windows
@@ -201,28 +204,239 @@ for alignment in 6samtools/*.bam; do
     fi
 done
 
-for alignment in 6samtools/*.bam; do
-	echo $alignment
-	# picard MarkDuplicates \
-	# 	-I $alignment \
-	# 	-O 7picard/$(basename $alignment .bam)_marked_duplicates.bam \
-	# 	-M 7picard/$(basename $alignment .bam)_marked_dup_metrics.txt
-	# 	REMOVE_DUPLICATES=true
-done
+#Sort alignment, mark and remove duplicates, index output files 
+for alignment in 7picard/*.bam; do
+	echo "Processing file: $alignment"
+	base_name=${alignment%.bam}
 
-for case in 6samtools/*7*.bam; do 
-	normal=${case/7/6}
-	echo $case
-	echo $normal 
-	# picard MarkDuplicates \
-	# 	-I sorted.bam \
-	# 	-O marked_duplicates.bam \
-	# 	-M marked_dup_metrics.txt
+	echo "Sorting BAM file before marking duplicates..."
+    samtools sort "$alignment" -o "${base_name}_sorted.bam"
+
+	echo "Running picard MarkDuplicates..."
+	picard MarkDuplicates \
+		-I "${base_name}_sorted.bam" \
+		-O ${base_name}_marked_duplicates.bam \
+		-M ${base_name}_marked_dup_metrics.txt \
+		-VALIDATION_STRINGENCY LENIENT \
+		--REMOVE_DUPLICATES true
+
+	echo "Indexing BAM file..."
+    samtools index "${base_name}_marked_duplicates.bam"
 done
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
 
-# STEP 5 Copy number calling pipeline
+# STEP 5 Download and process db references
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
+
+#annovar download wget http://www.openbioinformatics.org/annovar/download/0wgxR2rIVP/annovar.latest.tar.gz
+#added annovar to ~/.bashrc 
+
+#download 
+#files:
+# dbSNP, Mills, 1000Genomes https://data.broadinstitute.org/snowman/hg19/variant_calling/vqsr_resources/Exome/v2/
+# gnomAD https://storage.googleapis.com/gcp-public-data--gnomad/release/2.1.1/vcf/exomes/gnomad.exomes.r2.1.1.sites.vcf.bgz from https://gnomad.broadinstitute.org/downloads#v2-core-dataset
+# EXAC https://hgdownload.soe.ucsc.edu/gbdb/hg19/ExAC/ExAC.r0.3.sites.vep.hg19.vcf.gz
+
+# gnomAD with annovar: annotate_variation.pl -buildver hg19 -downdb -webfrom annovar gnomad211_exome humandb/ => vcfconverter.sh => *.vcf
+
+#ESP6500SI https://hgdownload.soe.ucsc.edu/gbdb/hg19/evs/
+#download all files 
+wget https://hgdownload.soe.ucsc.edu/gbdb/hg19/evs/ESP6500SI-V2-SSA137.updatedProteinHgvs.chr{1..22}.snps_indels.vcf.gz
+wget https://hgdownload.soe.ucsc.edu/gbdb/hg19/evs/ESP6500SI-V2-SSA137.updatedProteinHgvs.chrX.snps_indels.vcf.gz
+wget https://hgdownload.soe.ucsc.edu/gbdb/hg19/evs/ESP6500SI-V2-SSA137.updatedProteinHgvs.chrY.snps_indels.vcf.gz
+
+#concatenate all chromosomes of ESP65000 in one file 
+for file in ESP6500SI-V2-SSA137.updatedProteinHgvs.chr*.snps_indels.vcf.gz; do
+    bcftools index "$file"
+done
+
+ls ESP6500SI-V2-SSA137.updatedProteinHgvs.chr*.snps_indels.vcf.gz | sort > vcf_list.txt
+
+bcftools concat -a -f vcf_list.txt -O z -o ESP6500SI-V2-SSA137_merged.vcf.gz
+
+#remove single files 
+rm ESP6500SI-V2-SSA137.updatedProteinHgvs.chr*.snps_indels.vcf.gz
+rm ESP6500SI-V2-SSA137.updatedProteinHgvs.chr*.snps_indels.vcf.gz.csi
+
+#rename gnomeAD file
+mv gnomad.exomes.r2.1.1.sites.vcf.bgz gnomad.exomes.r2.1.1.sites.vcf.gz
+
+#create dict file for hg19 
+gatk CreateSequenceDictionary \
+    -R hg19/hg19.fa \
+    -O hg19/hg19.dict
+
+#convert b37 files in hg19 
+#chain file downloaded from https://github.com/broadgsa/gatk/blob/master/public/chainFiles/b37tohg19.chain
+
+###############
+#Convert reference files from b37 to hg19 using CrossMap
+###############
+
+#new env for CrossMap (incompatible)
+conda create --name crossmap
+conda activate crossmap 
+
+# Install crossmap 
+conda install -c conda-forge compilers
+conda install -c conda-forge cython
+conda install -c conda-forge libgcc
+conda install -c bioconda htslib
+conda install pip 
+pip install CrossMap
+
+# Path configuration
+CHAIN_FILE="hg19/b37tohg19.chain"          # Path to the chain file for b37 to hg19 conversion
+REF_FASTA="hg19/hg19.fa"                   # hg19 reference FASTA file (must have .fai and .dict)
+INPUT_DIR="refdb"                          # Directory containing original b37 files
+REJECT_DIR="refdb/rejected"                # Directory for unmapped variants
+
+# Check if required files exist
+if [ ! -f "$CHAIN_FILE" ]; then
+    echo "Error: Chain file $CHAIN_FILE not found"
+    exit 1
+fi
+
+if [ ! -f "$REF_FASTA" ]; then
+    echo "Error: Reference FASTA file $REF_FASTA not found"
+    exit 1
+fi
+
+# Check if bgzip is installed
+if ! command -v bgzip &> /dev/null; then
+    echo "Error: bgzip not found. Please install htslib with: conda install -c bioconda htslib"
+    exit 1
+fi
+
+# Create output directories
+mkdir -p $REJECT_DIR
+
+# Loop through all b37 VCF files
+for file in $INPUT_DIR/*.b37.vcf.gz; do
+  # Check if matching files exist
+  if [ ! -f "$file" ]; then
+    echo "No .b37.vcf.gz files found in $INPUT_DIR"
+    exit 1
+  fi
+  
+  # Extract base name (e.g., dbsnp_138.b37.vcf.gz → dbsnp_138)
+  base_name=$(basename "$file" .b37.vcf.gz)
+  
+  # Define temporary uncompressed output file
+  temp_output="$INPUT_DIR/${base_name}.hg19.vcf"
+  # Define final bgzip-compressed output file
+  #final_output="$INPUT_DIR/${base_name}.hg19.vcf.gz"
+  
+  echo "Converting $file to hg19 format..."
+  
+  # Run CrossMap conversion with --no-compress to get uncompressed output
+  CrossMap vcf \
+    $CHAIN_FILE \
+    $file \
+    $REF_FASTA \
+    $temp_output \
+    2>&1 | tee "$REJECT_DIR/${base_name}.log"
+  
+  # Check if conversion was successful
+  if [ -f "$temp_output" ]; then
+    echo "Compressing with bgzip..."
+    # Compress with bgzip (block gzip) for proper genomic data handling
+    bgzip -f "$temp_output"
+    echo "Output file compressed with bgzip: ${temp_output}.gz"
+    
+    # Create tabix index for the compressed VCF
+    # tabix -p vcf "${temp_output}.gz"
+    # echo "Created tabix index: ${temp_output}.gz.tbi"
+  else
+    echo "Error: CrossMap did not create output file $temp_output"
+    continue
+  fi
+  
+  # Handle unmapped variants if they exist
+  if [ -f "${temp_output}.unmap" ]; then
+    mv "${temp_output}.unmap" "$REJECT_DIR/${base_name}.rejected.vcf"
+    echo "Unmapped variants saved to $REJECT_DIR/${base_name}.rejected.vcf"
+  fi
+done
+
+#move all b37 files in other directory 
+for file in refdb/*b37.vcf.gz; do 
+	mv $file notuseddb 
+done
+
+conda deactivate 
+conda activate dnaseq
+###############
+
+
+#Index all files 
+for file in refdb/*.vcf.gz; do 
+	echo $file 
+	#tabix -p vcf $file 
+done 
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
+
+# STEP 6 Base recalibration 
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
+
+mkdir 8gatk/ 
+
+#paths configuration 
+REF_GENOME="hg19/hg19.fa"  # .fai also present in hg19/
+OUTPUT_DIR="8gatk"
+DBSNP="refdb/dbsnp_138.b37.vcf.gz"
+MILLS="refdb/Mills_and_1000G_gold_standard.indels.hg19.vcf.gz"
+G1000="refdb/1000G_phase1.snps.high_confidence.hg19.vcf.gz"
+
+#Base Recalibration
+for file in input_files/*marked_duplicates.bam; do 
+sample_name=$(basename "$file" _marked_duplicates.bam)
+	gatk BaseRecalibrator \
+	-I $file \
+	-R $REF_GENOME \
+	--known-sites $DBSNP \
+	--known-sites $MILLS \
+	--known-sites $G1000 \
+	-O ${OUTPUT_DIR}/${sample_name}_recal_data.table
+
+	gatk ApplyBQSR \
+	-I $file \
+	-R $REF_GENOME \
+	--bqsr-recal-file ${OUTPUT_DIR}/${sample_name}_recal_data.table \
+	-O ${OUTPUT_DIR}/${sample_name}_tumor_recal.bam
+
+	samtools index ${OUTPUT_DIR}/${sample_name}_tumor_recal.bam
+done
+
+#Annotation of known variants with 
+
+#MuTect2 
+# Useful info: Mutect2 does not require a germline resource nor a panel of normals (PoN) to run, although both are recommended. 
+# The tool prefilters sites for the matched normal and the PoN. 
+# If a variant is absent from a given germline resource, then the value for --af-of-alleles-not-in-resource is used as an imputed allele frequency. 
+# Below is an excerpt of a known variants resource with population allele frequencies
+# https://gatk.broadinstitute.org/hc/en-us/articles/360037593851-Mutect2
+
+for case in 7picard/*7*.bam; do #SRR30834327 is tumor (case) 
+	normal=${case/7/6} 
+	echo $case
+	echo $normal 
+	# gatk Mutect2 \
+	# 	-R 5bwa/hg19/hg19.fa \
+	# 	-I $case \
+	# 	-I $normal \
+	# 	-tumor tumor_sample_name \
+	# 	-normal normal_sample_name \
+	# 	-O 8gatk/somatic_variants.vcf
+done
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
+
+# STEP X Copy number calling pipeline
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
 
@@ -246,7 +460,7 @@ mkdir 8cnvkitout/
 #Downloaded exome capture kit file, mappability file are moved in 7cnvkit/ 
 
 #For better accuracy calculating mappability with cnvkit 
-cnvkit.py access 5bwa/hg19/hg19.fa -o 7cnvkit/access-hg19.bed
+cnvkit.py access 5bwa/hg19/hg19.fa -o 7cnvkitin/access-hg19.bed
 
 #Cnvkit pipeline 
 num_cores=$(nproc)
