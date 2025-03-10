@@ -331,8 +331,8 @@ for file in $INPUT_DIR/*.b37.vcf.gz; do
   
   echo "Converting $file to hg19 format..."
   
-  # Run CrossMap conversion with --no-compress to get uncompressed output
-  CrossMap vcf \
+  # Run CrossMap conversion 
+  CrossMap vcf --chromid a \
     $CHAIN_FILE \
     $file \
     $REF_FASTA \
@@ -370,10 +370,47 @@ conda deactivate
 conda activate dnaseq
 ###############
 
+#Contigs in Mills and dbsnp still are formatted as "ID=1" instead of "ID=chr1"
+#Following script is to convert formatting to prevent gatk errors. 
+#Create chr mapping
+echo -e "1\tchr1\n2\tchr2\n3\tchr3\n4\tchr4\n5\tchr5\n6\tchr6\n7\tchr7\n8\tchr8\n9\tchr9\n10\tchr10\n11\tchr11\n12\tchr12\n13\tchr13\n14\tchr14\n15\tchr15\n16\tchr16\n17\tchr17\n18\tchr18\n19\tchr19\n20\tchr20\n21\tchr21\n22\tchr22\nX\tchrX\nY\tchrY\nMT\tchrM" > chr_map.txt
+
+rename_and_compress_vcf() {
+    local chr_map="$1"     
+    local input_vcf="$2"   
+    local output_vcf="$3"  
+
+	#Check input files
+    if [[ ! -f "$chr_map" ]]; then
+        echo "Error: Chromosome mapping file '$chr_map' not found!" >&2
+        return 1
+    fi
+
+    if [[ ! -f "$input_vcf" ]]; then
+        echo "Error: Input VCF file '$input_vcf' not found!" >&2
+        return 1
+    fi
+
+    #Change formatting 
+    bcftools annotate --rename-chrs "$chr_map" "$input_vcf" -Oz -o "$output_vcf"
+
+    #Check output file 
+    if [[ -f "$output_vcf" ]]; then
+        echo "Success: VCF file processed as '$output_vcf'"
+    else
+        echo "Error: Something went wrong, '$output_vcf' was not created!" >&2
+        return 1
+    fi
+}
+
+rename_and_compress_vcf chr_map.txt refdb/dbsnp_138.hg19.vcf.gz refdb/dbsnp_138.hg19.fixed.vcf.gz
+rename_and_compress_vcf chr_map.txt refdb/Mills_and_1000G_gold_standard.indels.hg19.vcf.gz refdb/Mills_and_1000G_gold_standard.indels.hg19.fixed.vcf.gz
 
 #Index all files 
 for file in refdb/*.vcf.gz; do 
-	tabix -p vcf $file 
+	if [ ! -f "${file}.tbi" ]; then 
+		tabix -p vcf "$file" 
+	fi
 done 
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
@@ -387,7 +424,7 @@ mkdir 8gatk/
 #paths configuration 
 REF_GENOME="hg19/hg19.fa"  # .fai also present in hg19/
 OUTPUT_DIR="8gatk"
-DBSNP="refdb/dbsnp_138.b37.vcf.gz"
+DBSNP="refdb/dbsnp_138.hg19.vcf.gz"
 MILLS="refdb/Mills_and_1000G_gold_standard.indels.hg19.vcf.gz"
 G1000="refdb/1000G_phase1.snps.high_confidence.hg19.vcf.gz"
 
@@ -408,7 +445,7 @@ sample_name=$(basename "$file" _marked_duplicates.bam)
 	--bqsr-recal-file ${OUTPUT_DIR}/${sample_name}_recal_data.table \
 	-O ${OUTPUT_DIR}/${sample_name}_tumor_recal.bam
 
-	samtools index ${OUTPUT_DIR}/${sample_name}_tumor_recal.bam
+	#samtools index ${OUTPUT_DIR}/${sample_name}_tumor_recal.bam
 done
 
 #Annotation of known variants with 
