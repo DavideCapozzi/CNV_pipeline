@@ -424,9 +424,144 @@ mkdir 8gatk/
 #paths configuration 
 REF_GENOME="hg19/hg19.fa"  # .fai also present in hg19/
 OUTPUT_DIR="8gatk"
-DBSNP="refdb/dbsnp_138.hg19.vcf.gz"
-MILLS="refdb/Mills_and_1000G_gold_standard.indels.hg19.vcf.gz"
+DBSNP="refdb/dbsnp_138.hg19.fixed.vcf.gz"
+MILLS="refdb/Mills_and_1000G_gold_standard.indels.hg19.fixed.vcf.gz"
 G1000="refdb/1000G_phase1.snps.high_confidence.hg19.vcf.gz"
+###################
+
+# Function to perform GATK base quality score recalibration on a single sample
+# Parameters:
+#   $1: BAM file path
+#   $2: Reference genome path
+#   $3: Output directory
+#   $4: dbSNP VCF file
+#   $5: Mills indels VCF file
+#   $6: 1000G VCF file
+function perform_base_recalibration() {
+    # Check if all required parameters are provided
+    if [ "$#" -ne 6 ]; then
+        echo "Error: Incorrect number of parameters"
+        echo "Usage: perform_base_recalibration <bam_file> <ref_genome> <output_dir> <dbsnp> <mills> <1000g>"
+        return 1
+    fi
+
+    # Assign parameters to named variables for clarity
+    local input_bam="$1"
+    local ref_genome="$2"
+    local output_dir="$3"
+    local dbsnp="$4"
+    local mills="$5"
+    local g1000="$6"
+
+    # Extract sample name from the input BAM file
+    local sample_name=$(basename "$input_bam" _marked_duplicates.bam)
+    
+    echo "Processing $sample_name..."
+
+    # Create output directory if it doesn't exist
+    mkdir -p "$output_dir"
+
+    # Define output files
+    local recal_table="${output_dir}/${sample_name}_recal_data.table"
+    local recal_bam="${output_dir}/${sample_name}_tumor_recal.bam"
+    
+    # Step 1: Base Recalibration - Generate recalibration table
+    # Skip if the table already exists and is valid
+    if [ -f "$recal_table" ]; then
+        echo "Recalibration table already exists for $sample_name. Checking file size..."
+        
+        # Verify file is not empty
+        if [ -s "$recal_table" ]; then
+            echo "Recalibration table is valid. Skipping BaseRecalibrator."
+        else
+            echo "Recalibration table exists but is empty. Regenerating..."
+            rm -f "$recal_table"
+        fi
+    fi
+    
+    # Generate recalibration table if needed
+    if [ ! -f "$recal_table" ]; then
+        echo "Running BaseRecalibrator for $sample_name..."
+        
+        # Run GATK BaseRecalibrator with memory settings
+        gatk --java-options "-Xmx32G -XX:+UseParallelGC" BaseRecalibrator \
+            -I "$input_bam" \
+            -R "$ref_genome" \
+            --known-sites "$dbsnp" \
+            --known-sites "$mills" \
+            --known-sites "$g1000" \
+            -O "$recal_table"
+        
+        # Check if the command was successful
+        if [ $? -ne 0 ]; then
+            echo "ERROR: BaseRecalibrator failed for $sample_name"
+            return 1
+        fi
+    fi
+    
+    # Step 2: Apply Base Quality Score Recalibration
+    # Check if the recalibrated BAM already exists and is valid
+    if [ -f "$recal_bam" ]; then
+        echo "Recalibrated BAM already exists for $sample_name. Checking integrity..."
+        
+        if samtools quickcheck "$recal_bam" 2>/dev/null; then
+            echo "BAM file is valid, skipping ApplyBQSR."
+        else
+            echo "BAM file is corrupted or incomplete, rerunning ApplyBQSR..."
+            rm -f "${recal_bam}"*  # Remove BAM and its index
+        fi
+    fi
+    
+    # Apply BQSR if needed
+    if [ ! -f "$recal_bam" ]; then
+        echo "Running ApplyBQSR for $sample_name..."
+        
+        # Run GATK ApplyBQSR with memory settings
+        gatk --java-options "-Xmx32G -XX:+UseParallelGC" ApplyBQSR \
+            -I "$input_bam" \
+            -R "$ref_genome" \
+            --bqsr-recal-file "$recal_table" \
+            -O "$recal_bam"
+        
+        # Check if the command was successful
+        if [ $? -ne 0 ]; then
+            echo "ERROR: ApplyBQSR failed for $sample_name"
+            return 1
+        fi
+        
+        # Index the recalibrated BAM file
+        echo "Indexing recalibrated BAM file..."
+        samtools index "$recal_bam"
+        
+        # Verify the created BAM file
+        if ! samtools quickcheck "$recal_bam" 2>/dev/null; then
+            echo "ERROR: Generated BAM file failed integrity check"
+            return 1
+        fi
+    fi
+    
+    echo "$sample_name processed successfully"
+    return 0
+}
+
+# Process each sample individually
+for file in input_files/*marked_duplicates.bam; do
+    # Run the function for each sample
+    perform_base_recalibration \
+        "$file" \
+        "$REF_GENOME" \
+        "$OUTPUT_DIR" \
+        "$DBSNP" \
+        "$MILLS" \
+        "$G1000"
+    
+    # Check if the function was successful
+    if [ $? -ne 0 ]; then
+        echo "Processing failed for $file, continuing with next sample"
+    fi
+done
+
+#################
 
 #Base Recalibration
 for file in input_files/*marked_duplicates.bam; do 
@@ -445,7 +580,7 @@ sample_name=$(basename "$file" _marked_duplicates.bam)
 	--bqsr-recal-file ${OUTPUT_DIR}/${sample_name}_recal_data.table \
 	-O ${OUTPUT_DIR}/${sample_name}_tumor_recal.bam
 
-	#samtools index ${OUTPUT_DIR}/${sample_name}_tumor_recal.bam
+	samtools index ${OUTPUT_DIR}/${sample_name}_tumor_recal.bam
 done
 
 #Annotation of known variants with 
